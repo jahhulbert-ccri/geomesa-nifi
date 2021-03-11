@@ -1,0 +1,4 @@
+ID,Name,Age,LastSeen,Friends,Skills,Lon,Lat,Vis
+23623,Harry,21,2016-05-06,"Will, Mark, Suzan","patronus->10,expelliarmus->9",-100.2365,24,user
+26236,Hermione,26,2016-06-07,"Edward, Bill, Harry","accio->10",40.232,-52.2356,user
+3233,Severus,31,2016-10-23,"Tom, Riddle, Voldemort","potions->10",3,-61.23,user&admin

@@ -41,7 +41,7 @@ trait FeatureTypeIngestProcessor extends DataStoreIngestProcessor with FeatureTy
         flowFileName: String): IngestResult = {
       val sft = loadFeatureType(context, file)
       checkSchema(sft)
-      val writer = writers.borrowWriter(sft.getTypeName)
+      val writer = writers.borrowWriter(sft.getTypeName, file)
       try { ingest(session, file, flowFileName, sft, writer) } finally {
         writers.returnWriter(writer)
       }

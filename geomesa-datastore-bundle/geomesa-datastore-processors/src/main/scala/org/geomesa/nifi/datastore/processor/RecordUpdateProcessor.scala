@@ -92,7 +92,7 @@ trait RecordUpdateProcessor extends DataStoreProcessor {
         try {
           logger.debug(s"Running ${getClass.getName} on file $fullFlowFileName")
           val opts = options(context, file.getAttributes)
-          val id = context.getProperty(LookupCol).evaluateAttributeExpressions(file.getAttributes).getValue
+          val id = context.getProperty(LookupCol).evaluateAttributeExpressions(file).getValue
           val filterFactory = if (opts.fidField.contains(id)) { FidFilter } else { new AttributeFilter(id) }
 
           var success, failure = 0L

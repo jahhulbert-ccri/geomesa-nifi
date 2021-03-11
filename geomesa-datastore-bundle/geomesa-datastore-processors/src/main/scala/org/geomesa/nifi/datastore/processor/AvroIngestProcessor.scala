@@ -125,7 +125,7 @@ trait AvroIngestProcessor extends DataStoreIngestProcessor {
 
             val mapper = checkSchemaAndMapping(sft)
             val features = mapper.map(m => reader.map(m.apply)).getOrElse(reader)
-            val writer = writers.borrowWriter(sft.getTypeName)
+            val writer = writers.borrowWriter(sft.getTypeName, file)
             try {
               features.foreach { sf =>
                 try {

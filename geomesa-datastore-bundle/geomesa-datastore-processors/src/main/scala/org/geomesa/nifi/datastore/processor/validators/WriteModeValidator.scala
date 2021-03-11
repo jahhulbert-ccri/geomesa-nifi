@@ -9,24 +9,25 @@
 package org.geomesa.nifi.datastore.processor.validators
 
 import org.apache.nifi.components.{ValidationContext, ValidationResult, Validator}
+import org.geomesa.nifi.datastore.processor.mixins.DataStoreIngestProcessor.FeatureWriters
 
 import scala.util.{Success, Try}
 
 /**
-  * Validates gzip level, between 1-9
+  * Validates write mode
   */
-object GzipLevelValidator extends Validator {
+object WriteModeValidator extends Validator {
+
+  private val Values = Seq(FeatureWriters.Append, FeatureWriters.Modify)
+
   override def validate(subject: String, input: String, context: ValidationContext): ValidationResult = {
     val builder = new ValidationResult.Builder().subject(subject).input(input)
-    if (input == null || input.isEmpty) {
-      builder.valid(true).build()
-    } else if (context.isExpressionLanguageSupported(subject) && context.isExpressionLanguagePresent(input)) {
+    if (context.isExpressionLanguagePresent(input)) {
       builder.explanation("Expression Language Present").valid(true).build()
+    } else if (input == null || input.isEmpty || Values.exists(_.equalsIgnoreCase(input))) {
+      builder.valid(true).build()
     } else {
-      Try(input.toInt) match {
-        case Success(i) if i > 0 && i < 10 => builder.valid(true).build()
-        case _ => builder.explanation("Input must be an integer between 1 and 9").valid(false).build()
-      }
+      builder.explanation(s"Input must be one of '${Values.mkString("', '")}'").valid(false).build()
     }
   }
 }

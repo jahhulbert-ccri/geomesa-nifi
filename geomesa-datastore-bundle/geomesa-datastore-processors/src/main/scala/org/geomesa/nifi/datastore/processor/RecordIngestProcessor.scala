@@ -94,7 +94,7 @@ trait RecordIngestProcessor extends DataStoreIngestProcessor {
               nextRecord
             }
 
-            val writer = writers.borrowWriter(converter.sft.getTypeName)
+            val writer = writers.borrowWriter(converter.sft.getTypeName, file)
             try {
               var record = nextRecord
               while (record != null) {

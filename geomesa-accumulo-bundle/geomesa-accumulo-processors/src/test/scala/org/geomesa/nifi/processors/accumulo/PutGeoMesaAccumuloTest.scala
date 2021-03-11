@@ -218,9 +218,6 @@ class PutGeoMesaAccumuloTest extends LazyLogging {
   def testAvroIngestByName(): Unit = {
     val catalog = s"${root}AvroIngestByName"
 
-    // This should be the "Good SFT" for the example-csv.avro
-    val sft = SimpleFeatureTypes.createType("test", "fid:Int,name:String,age:Int,lastseen:Date,*geom:Point:srid=4326")
-
     // Let's make a new Avro file
     val sft2 = SimpleFeatureTypes.createType("test2", "lastseen:Date,newField:Double,age:Int,name:String,*geom:Point:srid=4326")
 
@@ -468,6 +465,64 @@ class PutGeoMesaAccumuloTest extends LazyLogging {
         Seq("Harry", "Hermione Granger", "Severus Snape"),
         Seq("2016-05-06", "2016-06-07", "2016-10-23").map(df.parse),
         Seq("POINT (-100.2365 33)", "POINT (40.232 -43.2356)", "POINT (3 -52.23)")
+      )
+    } finally {
+      runner.shutdown()
+    }
+  }
+
+  @Test
+  def testAppendThenUpdateIngest(): Unit = {
+    val catalog = s"${root}AppendUpdateIngest"
+    val runner = TestRunners.newTestRunner(new PutGeoMesaAccumulo())
+
+    def checkResults(ages: Seq[Int], dates: Seq[Date], geoms: Seq[String]): Unit = {
+      val ds = DataStoreFinder.getDataStore((dsParams + (AccumuloDataStoreParams.CatalogParam.key -> catalog)).asJava)
+      Assert.assertNotNull(ds)
+      try {
+        val sft = ds.getSchema("example")
+        Assert.assertNotNull(sft)
+        val features = SelfClosingIterator(ds.getFeatureSource("example").getFeatures.features()).toList.sortBy(_.getID)
+        logger.debug(features.mkString(";"))
+        Assert.assertEquals(3, features.length)
+        Assert.assertEquals(Seq("23623", "26236", "3233"), features.map(_.getID))
+        Assert.assertEquals(Seq("Harry", "Hermione", "Severus"), features.map(_.getAttribute("name")))
+        Assert.assertEquals(ages, features.map(_.getAttribute("age")))
+        Assert.assertEquals(dates, features.map(_.getAttribute("dtg")))
+        Assert.assertEquals(geoms, features.map(_.getAttribute("geom").toString))
+      } finally {
+        ds.dispose()
+      }
+    }
+
+    val df = new SimpleDateFormat("yyyy-MM-dd")
+    try {
+      dsParams.foreach { case (k, v) => runner.setProperty(k, v) }
+      runner.setProperty(AccumuloDataStoreParams.CatalogParam.key, catalog)
+      runner.setProperty(FeatureTypeProcessor.Properties.SftNameKey, "example")
+      runner.setProperty(ConvertInputProcessor.Properties.ConverterNameKey, "example-csv")
+      runner.setProperty(DataStoreIngestProcessor.Properties.WriteMode, "${geomesa.write.mode}")
+      runner.setProperty(DataStoreIngestProcessor.Properties.ModifyAttribute, "${geomesa.update.attribute}")
+      runner.enqueue(getClass.getClassLoader.getResourceAsStream("example.csv"))
+      runner.run()
+      runner.assertTransferCount(Relationships.SuccessRelationship, 1)
+      runner.assertTransferCount(Relationships.FailureRelationship, 0)
+      checkResults(
+        Seq(20, 25, 30),
+        Seq("2015-05-06", "2015-06-07", "2015-10-23").map(df.parse),
+        Seq("POINT (-100.2365 23)", "POINT (40.232 -53.2356)", "POINT (3 -62.23)")
+      )
+
+      runner.enqueue(
+        getClass.getClassLoader.getResourceAsStream("example-update-3.csv"),
+        Map("geomesa.write.mode" -> "modify", "geomesa.update.attribute" -> "name").asJava)
+      runner.run()
+      runner.assertTransferCount(Relationships.SuccessRelationship, 2)
+      runner.assertTransferCount(Relationships.FailureRelationship, 0)
+      checkResults(
+        Seq(21, 26, 31),
+        Seq("2016-05-06", "2016-06-07", "2016-10-23").map(df.parse),
+        Seq("POINT (-100.2365 24)", "POINT (40.232 -52.2356)", "POINT (3 -61.23)")
       )
     } finally {
       runner.shutdown()

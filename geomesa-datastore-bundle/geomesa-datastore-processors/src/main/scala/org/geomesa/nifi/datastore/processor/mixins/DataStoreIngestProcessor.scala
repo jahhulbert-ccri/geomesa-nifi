@@ -11,6 +11,7 @@ package org.geomesa.nifi.datastore.processor
 package mixins
 
 import java.io.Closeable
+import java.util.Collections
 import java.util.concurrent.TimeUnit
 
 import com.github.benmanes.caffeine.cache.{CacheLoader, Caffeine}
@@ -19,13 +20,15 @@ import org.apache.commons.pool2.impl.{DefaultPooledObject, GenericObjectPool, Ge
 import org.apache.commons.pool2.{BasePooledObjectFactory, ObjectPool, PooledObject}
 import org.apache.nifi.annotation.behavior.{SupportsBatching, WritesAttribute, WritesAttributes}
 import org.apache.nifi.annotation.lifecycle._
-import org.apache.nifi.components.PropertyDescriptor
+import org.apache.nifi.components.{PropertyDescriptor, PropertyValue}
 import org.apache.nifi.expression.ExpressionLanguageScope
 import org.apache.nifi.flowfile.FlowFile
 import org.apache.nifi.processor._
 import org.apache.nifi.processor.util.StandardValidators
 import org.apache.nifi.util.FormatUtils
 import org.geomesa.nifi.datastore.processor.CompatibilityMode.CompatibilityMode
+import org.geomesa.nifi.datastore.processor.mixins.DataStoreIngestProcessor.DynamicWriters
+import org.geomesa.nifi.datastore.processor.validators.WriteModeValidator
 import org.geotools.data._
 import org.geotools.filter.text.ecql.ECQL
 import org.geotools.util.factory.Hints
@@ -75,13 +78,22 @@ trait DataStoreIngestProcessor extends DataStoreProcessor {
         new SingletonWriters(dataStore)
       }
 
-      val writers =
-        if (context.getProperty(WriteMode).getValue == FeatureWriters.Modify) {
-          val attribute = Option(context.getProperty(ModifyAttribute).evaluateAttributeExpressions().getValue)
-          new ModifyWriters(dataStore, attribute, appender)
+      val writers = {
+        val modeProp = context.getProperty(WriteMode)
+        val attrProp = context.getProperty(ModifyAttribute)
+        lazy val modify = {
+          val value = modeProp.evaluateAttributeExpressions(Collections.emptyMap[String, String]).getValue
+          FeatureWriters.Modify.equalsIgnoreCase(value)
+        }
+        if (modeProp.isExpressionLanguagePresent || (modify && attrProp.isExpressionLanguagePresent)) {
+          new DynamicWriters(dataStore, modeProp, attrProp, appender)
+        } else if (modify) {
+          val attr = Option(attrProp.evaluateAttributeExpressions(Collections.emptyMap[String, String]).getValue)
+          new ModifyWriters(dataStore, attr, appender)
         } else {
           appender
         }
+      }
 
       try {
         ingest = createIngest(context, dataStore, writers, mode)
@@ -277,9 +289,10 @@ object DataStoreIngestProcessor {
      * Get a feature writer for the given file
      *
      * @param typeName simple feature type name
+     * @param file the flow file being operated on
      * @return
      */
-    def borrowWriter(typeName: String): SimpleWriter
+    def borrowWriter(typeName: String, file: FlowFile): SimpleWriter
 
     /**
      *
@@ -365,7 +378,7 @@ object DataStoreIngestProcessor {
       }
     )
 
-    override def borrowWriter(typeName: String): SimpleWriter = cache.get(typeName).borrowObject()
+    override def borrowWriter(typeName: String, file: FlowFile): SimpleWriter = cache.get(typeName).borrowObject()
     override def returnWriter(writer: SimpleWriter): Unit = cache.get(writer.typeName).returnObject(writer)
 
     override def invalidate(typeName: String): Unit = {
@@ -386,7 +399,7 @@ object DataStoreIngestProcessor {
    * @param ds datastore
    */
   class SingletonWriters(ds: DataStore) extends FeatureWriters {
-    override def borrowWriter(typeName: String): SimpleWriter =
+    override def borrowWriter(typeName: String, file: FlowFile): SimpleWriter =
       AppendWriter(typeName, ds.getFeatureWriterAppend(typeName, Transaction.AUTO_COMMIT))
     override def returnWriter(writer: SimpleWriter): Unit = CloseWithLogging(writer)
     override def invalidate(typeName: String): Unit = {}
@@ -401,12 +414,46 @@ object DataStoreIngestProcessor {
    * @param appender appending writer factory
    */
   class ModifyWriters(ds: DataStore, attribute: Option[String], appender: FeatureWriters) extends FeatureWriters {
-    override def borrowWriter(typeName: String): SimpleWriter =
-      ModifyWriter(ds, typeName, attribute, appender.borrowWriter(typeName))
+    override def borrowWriter(typeName: String, file: FlowFile): SimpleWriter =
+      ModifyWriter(ds, typeName, attribute, appender.borrowWriter(typeName, file))
     override def returnWriter(writer: SimpleWriter): Unit = {
       val ModifyWriter(_, _, _, append) = writer
       appender.returnWriter(append)
       CloseWithLogging(writer)
+    }
+    override def invalidate(typeName: String): Unit = appender.invalidate(typeName)
+    override def close(): Unit = CloseWithLogging(appender) // note: also disposes of the datastore
+  }
+
+  /**
+   * Dynamically creates append or modify writers based on flow file attributes
+   *
+   * @param ds data store
+   * @param mode write mode property value
+   * @param attribute identifying attribute property value
+   * @param appender appending writer
+   */
+  class DynamicWriters(ds: DataStore, mode: PropertyValue, attribute: PropertyValue, appender: FeatureWriters)
+      extends FeatureWriters {
+    override def borrowWriter(typeName: String, file: FlowFile): SimpleWriter = {
+      lazy val append = appender.borrowWriter(typeName, file)
+      lazy val modify =
+        ModifyWriter(ds, typeName, Option(attribute.evaluateAttributeExpressions(file).getValue), append)
+      mode.evaluateAttributeExpressions(file).getValue match {
+        case null | "" => append
+        case m if m.equalsIgnoreCase(FeatureWriters.Append) => append
+        case m if m.equalsIgnoreCase(FeatureWriters.Modify) => modify
+        case m => throw new IllegalArgumentException(s"Invalid value for ${Properties.WriteMode.getName}: $m")
+      }
+    }
+    override def returnWriter(writer: SimpleWriter): Unit = {
+      writer match {
+        case m: ModifyWriter =>
+          appender.returnWriter(m.append)
+          CloseWithLogging(m)
+        case _ =>
+          appender.returnWriter(writer)
+      }
     }
     override def invalidate(typeName: String): Unit = appender.invalidate(typeName)
     override def close(): Unit = CloseWithLogging(appender) // note: also disposes of the datastore
@@ -422,7 +469,8 @@ object DataStoreIngestProcessor {
           .name("write-mode")
           .displayName("Write Mode")
           .description("Use an appending writer (for new features) or a modifying writer (to update existing features)")
-          .allowableValues(FeatureWriters.Append, FeatureWriters.Modify)
+          .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
+          .addValidator(WriteModeValidator)
           .defaultValue(FeatureWriters.Append)
           .build()
 
@@ -434,7 +482,7 @@ object DataStoreIngestProcessor {
             "When using a modifying writer, the attribute used to uniquely identify the feature. " +
               "If not specified, will use the feature ID")
           .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
-          .expressionLanguageSupported(ExpressionLanguageScope.VARIABLE_REGISTRY)
+          .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
           .build()
 
     val FeatureWriterCaching: PropertyDescriptor =
